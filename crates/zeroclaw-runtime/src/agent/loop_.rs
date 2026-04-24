@@ -2676,6 +2676,73 @@ pub async fn run(
             .expect("CLI channel factory not registered — call register_cli_channel_fn at startup")(
         );
 
+        // Persistent SIGINT handler that cancels the in-flight turn when one
+        // is active, and otherwise exits the process. Once `tokio::signal::ctrl_c()`
+        // is awaited on Unix it installs a global handler that consumes SIGINT
+        // forever — so we must keep a listener alive for the whole session,
+        // not spawn/abort one per turn (which leaves SIGINT silently swallowed
+        // when the user presses Ctrl+C at the prompt).
+        let active_cancel: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        {
+            let active_cancel_sig = active_cancel.clone();
+            tokio::spawn(async move {
+                #[cfg(unix)]
+                {
+                    let mut sig = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::interrupt(),
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to install SIGINT handler");
+                            return;
+                        }
+                    };
+                    while sig.recv().await.is_some() {
+                        let should_exit = {
+                            let guard = active_cancel_sig.lock().expect("mutex poisoned");
+                            match guard.as_ref() {
+                                Some(token) => {
+                                    token.cancel();
+                                    false
+                                }
+                                None => true,
+                            }
+                        };
+                        if should_exit {
+                            eprintln!();
+                            std::process::exit(130);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows fallback: ctrl_c() is documented as one-shot but
+                    // tokio re-arms the underlying event, so looping works in
+                    // practice. Good enough until we add a proper
+                    // tokio::signal::windows::ctrl_c() stream.
+                    loop {
+                        if tokio::signal::ctrl_c().await.is_err() {
+                            return;
+                        }
+                        let should_exit = {
+                            let guard = active_cancel_sig.lock().expect("mutex poisoned");
+                            match guard.as_ref() {
+                                Some(token) => {
+                                    token.cancel();
+                                    false
+                                }
+                                None => true,
+                            }
+                        };
+                        if should_exit {
+                            eprintln!();
+                            std::process::exit(130);
+                        }
+                    }
+                }
+            });
+        }
+
         // Persistent conversation history across turns
         let mut history = if let Some(path) = session_state_file.as_deref() {
             load_interactive_session_history(path, &system_prompt)?
@@ -2872,14 +2939,14 @@ pub async fn run(
                 }
             });
 
-            // Ctrl+C cancels the in-flight turn instead of killing the process.
+            // Register this turn's cancel token with the persistent
+            // SIGINT handler installed above. When the turn ends we clear the
+            // slot so a subsequent Ctrl+C at the prompt exits the process.
             let cancel_token = CancellationToken::new();
-            let cancel_token_clone = cancel_token.clone();
-            let ctrlc_handle = tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel_token_clone.cancel();
-                }
-            });
+            {
+                let mut guard = active_cancel.lock().expect("mutex poisoned");
+                *guard = Some(cancel_token.clone());
+            }
 
             let response = loop {
                 match TOOL_LOOP_COST_TRACKING_CONTEXT
@@ -2999,8 +3066,12 @@ pub async fn run(
                 }
             };
 
-            // Clean up: stop the Ctrl+C listener and flush streaming events.
-            ctrlc_handle.abort();
+            // Clean up: clear the active cancel-token slot and flush
+            // streaming events. The persistent SIGINT handler keeps running.
+            {
+                let mut guard = active_cancel.lock().expect("mutex poisoned");
+                *guard = None;
+            }
             drop(delta_tx);
             let _ = consumer_handle.await;
 
