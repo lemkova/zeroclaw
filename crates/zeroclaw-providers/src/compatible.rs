@@ -1532,7 +1532,10 @@ impl OpenAiCompatibleProvider {
                         content,
                         tool_call_id: None,
                         tool_calls: Some(tool_calls),
-                        reasoning_content,
+                        // DeepSeek V4 thinking mode requires reasoning_content on
+                        // every prior assistant message. Empty string satisfies
+                        // the presence check when we didn't capture reasoning.
+                        reasoning_content: reasoning_content.or_else(|| Some(String::new())),
                     };
                 }
 
@@ -1567,7 +1570,9 @@ impl OpenAiCompatibleProvider {
                     )),
                     tool_call_id: None,
                     tool_calls: None,
-                    reasoning_content: None,
+                    // DeepSeek V4 requires reasoning_content on assistant messages.
+                    // User/system messages never carry it.
+                    reasoning_content: if message.role == "assistant" { Some(String::new()) } else { None },
                 }
             })
             .collect()
