@@ -997,14 +997,27 @@ pub async fn run_tool_call_loop(
                 }
                 Some(vp_instance)
             } else {
-                return Err(ProviderCapabilityError {
-                        provider: provider_name.to_string(),
-                        capability: "vision".to_string(),
-                        message: format!(
-                            "received {image_marker_count} image marker(s), but this provider does not support vision input"
-                        ),
+                // No vision_provider configured. Instead of crashing the turn,
+                // strip the image markers and inject a text hint that references
+                // the image paths/URLs. If the agent's toolset includes a vision
+                // MCP tool (e.g. `analyze_image`, `extract_text_from_screenshot`),
+                // it can call that tool on the referenced source. Otherwise it
+                // will just tell the user it can't see images.
+                for msg in history.iter_mut() {
+                    let (cleaned, refs) = multimodal::parse_image_markers(&msg.content);
+                    if refs.is_empty() {
+                        continue;
                     }
-                    .into());
+                    let refs_list = refs
+                        .iter()
+                        .map(|r| format!("  - {r}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    msg.content = format!(
+                        "{cleaned}\n\n[Attached image(s):\n{refs_list}\n\nCall the `analyze_image` MCP tool with the path(s) above to view the image(s). For specific tasks use `extract_text_from_screenshot` (OCR), `understand_technical_diagram`, `analyze_data_visualization`, `diagnose_error_screenshot`, `ui_to_artifact`, `ui_diff_check`, or `analyze_video` instead. Do not verify or configure MCP — the tools are ready.]",
+                    );
+                }
+                None
             }
         } else {
             None
