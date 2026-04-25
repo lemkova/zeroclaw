@@ -904,12 +904,27 @@ pub fn skills_to_prompt_with_mode(
             // location of the skill so that scripts referenced by the skill
             // body can actually be invoked. Agents otherwise see literal
             // "${SKILL_DIR}" and fall back to inlining commands.
-            let skill_abs_dir = resolve_skill_location(skill, workspace_dir)
+            // resolve_skill_location() returns the path of SKILL.md (or the
+            // skill-toml file). For a `${SKILL_DIR}` placeholder we want the
+            // *parent* directory so referenced helper files (parse.sh, fetch.py)
+            // resolve correctly.
+            let resolved = resolve_skill_location(skill, workspace_dir);
+            let skill_abs_dir = resolved
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(resolved)
                 .display()
                 .to_string();
             let _ = writeln!(prompt, "    <instructions>");
             for instruction in &skill.prompts {
                 let expanded = instruction.replace("${SKILL_DIR}", &skill_abs_dir);
+                if instruction.contains("${SKILL_DIR}") {
+                    tracing::info!(
+                        skill = %skill.name,
+                        path = %skill_abs_dir,
+                        "skills: expanded skill-dir placeholder in instruction"
+                    );
+                }
                 write_xml_text_element(&mut prompt, 6, "instruction", &expanded);
             }
             let _ = writeln!(prompt, "    </instructions>");
