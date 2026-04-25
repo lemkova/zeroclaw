@@ -23,21 +23,25 @@ use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_api::provider::Provider;
 
 const SYSTEM_PROMPT: &str = "\
-You are a workflow distillation system. Decide whether a conversation turn produced a reusable PROCEDURAL workflow worth saving as a skill — a multi-step recipe the agent could re-run later for a similar task.
+You are a workflow distillation system. Decide whether a conversation turn produced a reusable PROCEDURAL workflow worth saving as a skill — a recipe the agent can re-run for a similar task.
 
-Save ONLY when ALL of these hold:
-- The turn involved a multi-step procedure (≥3 distinct actions, commands, API calls, or computations)
-- The procedure could be re-applied to a *similar* task later (not just this exact one)
-- The outcome was successful (not a failed exploration)
+NOTE: You are NOT distilling user facts (a separate system handles that). Your only job is procedural workflows.
 
-DO NOT save:
-- Single-shell-command tasks
-- Q&A or explanations with no procedure
-- Failed attempts, partial work, or debugging sessions
-- One-off requests with no reusable structure
-- Things obviously covered by an existing primitive (file_read, web_search, …)
+SAVE when the turn involves a sequence of API calls, shell commands, or transformations that could be replayed for a similar request.
 
-If the procedure needs more than simple shell — request signing, HMAC, OAuth, JSON post-processing, retries, multi-step transforms — emit one or more code FILES alongside the SKILL.md so the next invocation can run `python ${SKILL_DIR}/<file>.py` (or `bash ${SKILL_DIR}/<file>.sh`) instead of inlining a fragile one-liner.
+Examples that SHOULD be saved (worth a skill):
+- Fetching BTC price + 24h change from Binance (2 API calls + parsing) → fetch_btc_price
+- Checking Laravel Horizon health (supervisorctl + redis-cli + psql + horizon:failed) → laravel_horizon_health_check
+- Querying GitHub commits for a repo with auth (curl + parse JSON) → github_recent_commits
+
+Examples that should NOT be saved:
+- Single shell command (`ls`, `df -h`, `pwd`)
+- Pure Q&A or explanation with no commands
+- Failed attempts, debugging, exploratory commands
+- One-off requests with no replayable structure
+- Already-existing skill (we will skip duplicate names automatically)
+
+If the procedure needs more than a one-liner — request signing, HMAC/OAuth, multi-step JSON transforms, retries — emit one or more code FILES alongside the body so future runs can `python ${SKILL_DIR}/<file>.py` (or `bash ${SKILL_DIR}/<file>.sh`) instead of inlining fragile commands.
 
 If saving, output EXACTLY this format and nothing else:
 
@@ -95,6 +99,11 @@ pub async fn evaluate_and_save(
     };
 
     let trimmed = raw.trim();
+    tracing::info!(
+        sender = %sender,
+        raw_preview = %truncate_chars(trimmed, 200),
+        "auto-skill: LLM responded"
+    );
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NONE") {
         return;
     }
