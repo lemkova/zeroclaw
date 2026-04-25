@@ -51,6 +51,11 @@ fn load_openclaw_bootstrap_files(
 ///
 /// Daily memory files (`memory/*.md`) are NOT injected — they are accessed
 /// on-demand via `memory_recall` / `memory_search` tools.
+/// Display version string baked at compile time. Mirrors what
+/// `zeroclaw --version` prints, so the agent can answer identity/version
+/// questions from system-prompt context without spawning shell commands.
+const RUNTIME_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " + Lemkova Patch v0.4");
+
 pub fn build_system_prompt(
     workspace_dir: &std::path::Path,
     model_name: &str,
@@ -128,6 +133,16 @@ pub fn build_system_prompt_with_mode_and_autonomy(
          The user must ONLY see the final answer. Tool calls are invisible infrastructure — \
          never reference them. If you catch yourself starting a sentence about what tool \
          you are about to use or just used, DELETE it and give the answer directly.\n\n",
+    );
+
+    // ── 0a. Runtime identity (so the agent does not spawn shell ──
+    //        commands to derive its own name/version/paths) ────
+    let _ = write!(
+        prompt,
+        "## Runtime\n\n         You are running as the `zeroclaw` daemon, version **{ver}**, model **{model}**.\n         Workspace root: `{workspace}`.\n         When the user asks about your version, identity, model, or workspace,          answer directly from this section — do NOT shell out (`which`, `find`,          `--version`, `md5sum`, `/proc/...`) to derive what is already in your          context.\n\n",
+        ver = RUNTIME_VERSION,
+        model = model_name,
+        workspace = workspace_dir.display(),
     );
 
     // ── 0b. Tool Honesty ───────────────────────────────────────
