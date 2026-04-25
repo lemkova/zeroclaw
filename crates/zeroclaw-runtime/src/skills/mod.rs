@@ -900,9 +900,17 @@ pub fn skills_to_prompt_with_mode(
             zeroclaw_config::schema::SkillsPromptInjectionMode::Full
         ) && !skill.prompts.is_empty()
         {
+            // Expand ${SKILL_DIR} in instruction text to the absolute on-disk
+            // location of the skill so that scripts referenced by the skill
+            // body can actually be invoked. Agents otherwise see literal
+            // "${SKILL_DIR}" and fall back to inlining commands.
+            let skill_abs_dir = resolve_skill_location(skill, workspace_dir)
+                .display()
+                .to_string();
             let _ = writeln!(prompt, "    <instructions>");
             for instruction in &skill.prompts {
-                write_xml_text_element(&mut prompt, 6, "instruction", instruction);
+                let expanded = instruction.replace("${SKILL_DIR}", &skill_abs_dir);
+                write_xml_text_element(&mut prompt, 6, "instruction", &expanded);
             }
             let _ = writeln!(prompt, "    </instructions>");
         }
