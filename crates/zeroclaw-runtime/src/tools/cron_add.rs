@@ -80,11 +80,11 @@ impl Tool for CronAddTool {
                     "oneOf": [
                         {
                             "type": "object",
-                            "description": "Cron expression schedule (repeating). Example: {\"kind\":\"cron\",\"expr\":\"0 9 * * 1-5\",\"tz\":\"America/New_York\"}",
+                            "description": "Cron expression schedule (repeating). CRITICAL: the cron expression is interpreted in the timezone given by `tz` (or UTC if `tz` is omitted). DO NOT pre-convert hours to UTC — pass the local hour the user actually said. Examples: 8am Jakarta weekdays = {\"kind\":\"cron\",\"expr\":\"0 8 * * 1-5\",\"tz\":\"Asia/Jakarta\"}. 9am New York weekdays = {\"kind\":\"cron\",\"expr\":\"0 9 * * 1-5\",\"tz\":\"America/New_York\"}. Daily midnight London = {\"kind\":\"cron\",\"expr\":\"0 0 * * *\",\"tz\":\"Europe/London\"}.",
                             "properties": {
                                 "kind": { "type": "string", "enum": ["cron"] },
-                                "expr": { "type": "string", "description": "Standard 5-field cron expression, e.g. '*/5 * * * *'" },
-                                "tz": { "type": "string", "description": "Optional IANA timezone name, e.g. 'America/New_York'. Defaults to UTC." }
+                                "expr": { "type": "string", "description": "Standard 5-field cron expression (minute hour dom month dow) interpreted in the timezone given by `tz`. For 8am Jakarta this is '0 8 * * 1-5' with tz='Asia/Jakarta' — NOT '0 1 * * 1-5'. Use the local hour the user said." },
+                                "tz": { "type": "string", "description": "IANA timezone name, e.g. 'Asia/Jakarta', 'America/New_York', 'Europe/London'. The cron expression is interpreted in this timezone. Defaults to UTC when omitted." }
                             },
                             "required": ["kind", "expr"]
                         },
