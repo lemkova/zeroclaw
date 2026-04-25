@@ -867,6 +867,12 @@ pub fn skills_to_prompt_with_mode(
             "## Available Skills\n\n\
              Skill instructions and tool metadata are preloaded below.\n\
              Follow these instructions directly; do not read skill files at runtime unless the user asks.\n\n\
+             SKILL-FIRST POLICY: before solving any procedural task, scan the skills below \
+             for one that already covers it. If a relevant skill exists, RUN IT (e.g. \
+             `bash <skill_dir>/parse.sh`) instead of re-deriving an inline command chain. \
+             Only fall back to inline tool calls when no skill matches. If you discover a \
+             genuinely better way to do what an existing skill already does, update the \
+             skill file with `file_edit` rather than forking an inline alternative.\n\n\
              <available_skills>\n",
         ),
         zeroclaw_config::schema::SkillsPromptInjectionMode::Compact => String::from(
