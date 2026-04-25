@@ -57,10 +57,19 @@ impl Tool for CronAddTool {
 
     fn description(&self) -> &str {
         "Create a scheduled cron job (shell or agent) with cron/at/every schedules. \
-         Use job_type='agent' with a prompt to run the AI agent on schedule. \
-         To deliver output to a channel (Discord, Telegram, Slack, Mattermost, Matrix, QQ), set \
-         delivery={\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id_or_chat_id>\"}. \
-         This is the preferred tool for sending scheduled/delayed messages to users via channels."
+         To deliver output to a channel (Telegram, Discord, Slack, Mattermost, Matrix, QQ), set \
+         delivery={\"mode\":\"announce\",\"channel\":\"telegram\",\"to\":\"<chat_id>\"}. \
+         The announced message is the JOB OUTPUT (shell stdout, or agent reply). \
+         JOB TYPE SELECTION (matters for cost/latency): \
+         (a) job_type='shell' for STATIC or DETERMINISTIC announcements — no LLM call, \
+         shell stdout becomes the message. Examples: {\"job_type\":\"shell\",\"command\":\"echo Ping!\"}, \
+         {\"job_type\":\"shell\",\"command\":\"uptime\"}, \
+         {\"job_type\":\"shell\",\"command\":\"bash /home/ubuntu/.zeroclaw/workspace/skills/fetch_btc_price/parse.sh\"}. \
+         Prefer this whenever the message body is fixed text or comes from a deterministic command/skill. \
+         (b) job_type='agent' ONLY when the announcement requires LLM reasoning at run time \
+         (e.g. \"summarise the day's logs\", \"fetch X then comment on it\"). Each agent run \
+         is a full LLM turn — do NOT use it for trivial pings, reminders, or fixed messages. \
+         This is the preferred tool for sending scheduled/delayed messages via channels."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
