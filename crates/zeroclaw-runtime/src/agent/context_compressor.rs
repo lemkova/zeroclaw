@@ -472,7 +472,14 @@ fn build_transcript(messages: &[ChatMessage], max_chars: usize) -> String {
     let mut transcript = String::new();
     for msg in messages {
         let role = msg.role.to_uppercase();
-        let _ = writeln!(transcript, "{role}: {}", msg.content.trim());
+        // Strip [IMAGE:path] markers — the summarizer is text-only, and if the
+        // compressor LLM lacks vision, the marker would be expanded into an
+        // image_url content part by the provider and rejected (e.g. DeepSeek
+        // V4: "unknown variant `image_url`, expected `text`"). The image
+        // metadata isn't useful for textual summarization anyway.
+        let (cleaned, _refs) =
+            zeroclaw_providers::multimodal::parse_image_markers(&msg.content);
+        let _ = writeln!(transcript, "{role}: {}", cleaned.trim());
     }
 
     if transcript.len() > max_chars {
