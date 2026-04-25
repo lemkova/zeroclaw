@@ -1401,6 +1401,11 @@ async fn run_gateway_chat_with_tools(
 #[derive(serde::Deserialize)]
 pub struct WebhookBody {
     pub message: String,
+    /// Optional sender identity for memory scoping (per-user isolation).
+    /// Falls back to the `X-Session-Id` header, then to "gateway" if neither
+    /// is provided.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// POST /webhook — main webhook endpoint
@@ -1494,7 +1499,13 @@ async fn handle_webhook(
     }
 
     let message = &webhook_body.message;
-    let session_id = webhook_session_id(&headers);
+    let session_id = webhook_body
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| webhook_session_id(&headers));
 
     if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(message) {
         let key = webhook_memory_key();
