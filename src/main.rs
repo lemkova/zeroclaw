@@ -190,7 +190,7 @@ enum EstopLevelArg {
 #[derive(Parser, Debug)]
 #[command(name = "zeroclaw")]
 #[command(author = "theonlyhennygod")]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " + Lemkova Patch v0.3"))]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " + Lemkova Patch v0.4"))]
 #[command(about = "The fastest, smallest AI assistant.", long_about = None)]
 struct Cli {
     #[arg(long, global = true)]
