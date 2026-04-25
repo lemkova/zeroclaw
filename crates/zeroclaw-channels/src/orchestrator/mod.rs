@@ -3228,6 +3228,8 @@ async fn process_channel_message(
                 let assistant_reply_for_skill = response.clone();
                 let sender_for_skill = msg.sender.clone();
                 let workspace_dir_for_skill = ctx.workspace_dir.as_ref().clone();
+                let notify_channel_for_skill = target_channel.clone();
+                let notify_target_for_skill = Some(msg.reply_target.clone());
                 tokio::spawn(async move {
                     zeroclaw_runtime::agent::auto_skill::evaluate_and_save(
                         provider_for_skill,
@@ -3236,6 +3238,8 @@ async fn process_channel_message(
                         assistant_reply_for_skill,
                         sender_for_skill,
                         workspace_dir_for_skill,
+                        notify_channel_for_skill,
+                        notify_target_for_skill,
                     )
                     .await;
                 });

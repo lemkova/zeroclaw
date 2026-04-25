@@ -3565,6 +3565,8 @@ pub async fn process_message(
                 reply_skill,
                 sender_skill,
                 workspace_skill,
+                None, // notify_channel: process_message path has no channel
+                None, // notify_target
             )
             .await;
         });

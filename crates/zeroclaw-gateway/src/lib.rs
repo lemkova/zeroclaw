@@ -1641,6 +1641,8 @@ async fn handle_webhook(
                         reply_skill,
                         sender_skill,
                         workspace_skill,
+                        None, // notify_channel: gateway webhook is one-shot
+                        None, // notify_target
                     )
                     .await;
                 });
