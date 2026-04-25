@@ -3295,7 +3295,7 @@ pub async fn process_message(
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
     let provider_runtime_options =
         zeroclaw_providers::provider_runtime_options_from_config(&config);
-    let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
+    let provider: Arc<dyn Provider> = Arc::from(zeroclaw_providers::create_routed_provider_with_options(
         provider_name,
         fallback_provider_pm.and_then(|e| e.api_key.as_deref()),
         fallback_provider_pm.and_then(|e| e.base_url.as_deref()),
@@ -3303,7 +3303,7 @@ pub async fn process_message(
         &config.providers.model_routes,
         &model_name,
         &provider_runtime_options,
-    )?;
+    )?);
 
     let hardware_rag: Option<crate::rag::HardwareRag> = config
         .peripherals
@@ -3491,7 +3491,7 @@ pub async fn process_message(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
-    agent_turn(
+    let agent_result = agent_turn(
         provider.as_ref(),
         &mut history,
         &tools_registry,
@@ -3511,7 +3511,39 @@ pub async fn process_message(
         None,
         None, // channel: process_message path has no channel ref
     )
-    .await
+    .await;
+
+    // ── Auto-dialectic memory hook (gateway/daemon path) ─────
+    // Mirrors the orchestrator-side hook: distill durable user facts from
+    // the (user_msg, assistant_reply) pair into per-sender Core memory.
+    // Fire-and-forget — never blocks the caller.
+    if config.memory.auto_dialectic
+        && let Ok(ref response) = agent_result
+        && let Some(sender) = session_id
+        && !sender.is_empty()
+        && !message.trim().is_empty()
+        && !response.trim().is_empty()
+    {
+        let provider_clone = Arc::clone(&provider);
+        let model_clone = model_name.clone();
+        let user_msg_clone = message.to_string();
+        let reply_clone = response.clone();
+        let sender_clone = sender.to_string();
+        let memory_clone = Arc::clone(&mem);
+        tokio::spawn(async move {
+            crate::agent::dialectic::distill_and_store(
+                provider_clone,
+                model_clone,
+                user_msg_clone,
+                reply_clone,
+                sender_clone,
+                memory_clone,
+            )
+            .await;
+        });
+    }
+
+    agent_result
 }
 
 #[cfg(test)]

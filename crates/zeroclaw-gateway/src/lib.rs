@@ -1568,6 +1568,36 @@ async fn handle_webhook(
             );
 
             let response = chat_response.text.unwrap_or_default();
+
+            // ── Auto-dialectic memory hook (gateway webhook path) ─
+            // Distill durable user facts from the (user_msg, assistant_reply)
+            // pair into per-sender Core memory. Fire-and-forget.
+            let auto_dialectic_enabled = state.config.lock().memory.auto_dialectic;
+            if auto_dialectic_enabled
+                && !response.trim().is_empty()
+                && !message.trim().is_empty()
+            {
+                let provider_clone = std::sync::Arc::clone(&state.provider);
+                let model_clone = state.model.clone();
+                let user_msg_clone = message.to_string();
+                let reply_clone = response.clone();
+                let sender_clone = session_id
+                    .clone()
+                    .unwrap_or_else(|| "gateway".to_string());
+                let memory_clone = std::sync::Arc::clone(&state.mem);
+                tokio::spawn(async move {
+                    zeroclaw_runtime::agent::dialectic::distill_and_store(
+                        provider_clone,
+                        model_clone,
+                        user_msg_clone,
+                        reply_clone,
+                        sender_clone,
+                        memory_clone,
+                    )
+                    .await;
+                });
+            }
+
             let body = serde_json::json!({"response": response, "model": state.model});
             (StatusCode::OK, Json(body))
         }
