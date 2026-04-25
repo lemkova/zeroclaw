@@ -1347,14 +1347,20 @@ async fn run_gateway_chat_simple(
     let user_messages = vec![ChatMessage::user(message)];
 
     // Keep webhook/gateway prompts aligned with channel behavior by injecting
-    // workspace-aware system context before model invocation.
+    // workspace-aware system context — including skills — before model
+    // invocation. Skills are loaded fresh on every webhook call so newly
+    // auto-created skills appear without a daemon restart.
     let system_prompt = {
         let config_guard = state.config.lock();
+        let skills = zeroclaw_runtime::skills::load_skills_with_config(
+            &config_guard.workspace_dir,
+            &config_guard,
+        );
         zeroclaw_runtime::agent::system_prompt::build_system_prompt(
             &config_guard.workspace_dir,
             &state.model,
             &[], // tools - empty for simple chat
-            &[], // skills
+            &skills,
             Some(&config_guard.identity),
             None, // bootstrap_max_chars - use default
         )
