@@ -4,6 +4,7 @@ pub mod classifier;
 pub mod context_analyzer;
 pub mod context_compressor;
 pub mod dialectic;
+pub mod auto_skill;
 pub mod cost;
 pub mod dispatcher;
 pub mod eval;

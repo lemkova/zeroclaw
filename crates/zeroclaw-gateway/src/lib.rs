@@ -1583,7 +1583,14 @@ async fn handle_webhook(
             // ── Auto-dialectic memory hook (gateway webhook path) ─
             // Distill durable user facts from the (user_msg, assistant_reply)
             // pair into per-sender Core memory. Fire-and-forget.
-            let auto_dialectic_enabled = state.config.lock().memory.auto_dialectic;
+            let (auto_dialectic_enabled, auto_skill_enabled, workspace_dir) = {
+                let cfg = state.config.lock();
+                (
+                    cfg.memory.auto_dialectic,
+                    cfg.memory.auto_skill,
+                    cfg.workspace_dir.clone(),
+                )
+            };
             if auto_dialectic_enabled
                 && !response.trim().is_empty()
                 && !message.trim().is_empty()
@@ -1604,6 +1611,30 @@ async fn handle_webhook(
                         reply_clone,
                         sender_clone,
                         memory_clone,
+                    )
+                    .await;
+                });
+            }
+            if auto_skill_enabled
+                && !response.trim().is_empty()
+                && !message.trim().is_empty()
+            {
+                let provider_skill = std::sync::Arc::clone(&state.provider);
+                let model_skill = state.model.clone();
+                let user_msg_skill = message.to_string();
+                let reply_skill = response.clone();
+                let sender_skill = session_id
+                    .clone()
+                    .unwrap_or_else(|| "gateway".to_string());
+                let workspace_skill = workspace_dir.clone();
+                tokio::spawn(async move {
+                    zeroclaw_runtime::agent::auto_skill::evaluate_and_save(
+                        provider_skill,
+                        model_skill,
+                        user_msg_skill,
+                        reply_skill,
+                        sender_skill,
+                        workspace_skill,
                     )
                     .await;
                 });

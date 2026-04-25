@@ -3213,6 +3213,34 @@ async fn process_channel_message(
                 });
             }
 
+            // ── Auto-skill creation hook ────────────────────
+            // Procedural counterpart to auto-dialectic: ask the LLM whether
+            // this turn was a reusable workflow, and if so write a SKILL.md
+            // under ~/.zeroclaw/workspace/skills/<name>/. Fire-and-forget.
+            if ctx.prompt_config.memory.auto_skill
+                && !msg.sender.is_empty()
+                && !msg.content.trim().is_empty()
+                && !response.trim().is_empty()
+            {
+                let provider_for_skill = Arc::clone(&active_provider);
+                let model_for_skill = route.model.to_string();
+                let user_msg_for_skill = msg.content.clone();
+                let assistant_reply_for_skill = response.clone();
+                let sender_for_skill = msg.sender.clone();
+                let workspace_dir_for_skill = ctx.workspace_dir.as_ref().clone();
+                tokio::spawn(async move {
+                    zeroclaw_runtime::agent::auto_skill::evaluate_and_save(
+                        provider_for_skill,
+                        model_for_skill,
+                        user_msg_for_skill,
+                        assistant_reply_for_skill,
+                        sender_for_skill,
+                        workspace_dir_for_skill,
+                    )
+                    .await;
+                });
+            }
+
             // ── Hook: on_message_sending (modifying) ─────────
             let mut outbound_response = response;
             if let Some(hooks) = &ctx.hooks {

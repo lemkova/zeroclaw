@@ -5162,6 +5162,13 @@ pub struct MemoryConfig {
     /// Adds one cheap LLM call per turn; off by default.
     #[serde(default)]
     pub auto_dialectic: bool,
+    /// Auto-codify multi-step procedural workflows from each turn into
+    /// `~/.zeroclaw/workspace/skills/<name>/SKILL.md` files. Counterpart to
+    /// `auto_dialectic` for procedural memory. Implemented as a
+    /// fire-and-forget hook (see `runtime::agent::auto_skill`).
+    /// Adds one cheap LLM call per turn; off by default.
+    #[serde(default)]
+    pub auto_skill: bool,
     /// Run memory/session hygiene (archiving + retention cleanup)
     #[serde(default = "default_hygiene_enabled")]
     pub hygiene_enabled: bool,
@@ -5383,6 +5390,7 @@ impl Default for MemoryConfig {
             backend: "sqlite".into(),
             auto_save: true,
             auto_dialectic: false,
+            auto_skill: false,
             hygiene_enabled: default_hygiene_enabled(),
             archive_after_days: default_archive_after_days(),
             purge_after_days: default_purge_after_days(),

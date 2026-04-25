@@ -3543,6 +3543,33 @@ pub async fn process_message(
         });
     }
 
+    // ── Auto-skill creation hook (process_message path) ────
+    if config.memory.auto_skill
+        && let Ok(ref response) = agent_result
+        && let Some(sender) = session_id
+        && !sender.is_empty()
+        && !message.trim().is_empty()
+        && !response.trim().is_empty()
+    {
+        let provider_skill = Arc::clone(&provider);
+        let model_skill = model_name.clone();
+        let user_msg_skill = message.to_string();
+        let reply_skill = response.clone();
+        let sender_skill = sender.to_string();
+        let workspace_skill = config.workspace_dir.clone();
+        tokio::spawn(async move {
+            crate::agent::auto_skill::evaluate_and_save(
+                provider_skill,
+                model_skill,
+                user_msg_skill,
+                reply_skill,
+                sender_skill,
+                workspace_skill,
+            )
+            .await;
+        });
+    }
+
     agent_result
 }
 
