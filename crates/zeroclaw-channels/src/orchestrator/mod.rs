@@ -3185,6 +3185,34 @@ async fn process_channel_message(
             }
         }
         LlmExecutionResult::Completed(Ok(Ok(response))) => {
+            // ── Auto-dialectic memory hook ───────────────────
+            // Distill durable user facts from the (user_msg, assistant_reply)
+            // pair into per-sender Core memory entries. Fire-and-forget so it
+            // does not slow the user-facing reply.
+            if ctx.prompt_config.memory.auto_dialectic
+                && !msg.sender.is_empty()
+                && !msg.content.trim().is_empty()
+                && !response.trim().is_empty()
+            {
+                let provider_for_dialectic = Arc::clone(&active_provider);
+                let model_for_dialectic = route.model.to_string();
+                let user_msg_for_dialectic = msg.content.clone();
+                let assistant_reply_for_dialectic = response.clone();
+                let sender_for_dialectic = msg.sender.clone();
+                let memory_for_dialectic = Arc::clone(&ctx.memory);
+                tokio::spawn(async move {
+                    zeroclaw_runtime::agent::dialectic::distill_and_store(
+                        provider_for_dialectic,
+                        model_for_dialectic,
+                        user_msg_for_dialectic,
+                        assistant_reply_for_dialectic,
+                        sender_for_dialectic,
+                        memory_for_dialectic,
+                    )
+                    .await;
+                });
+            }
+
             // ── Hook: on_message_sending (modifying) ─────────
             let mut outbound_response = response;
             if let Some(hooks) = &ctx.hooks {

@@ -658,6 +658,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
     MemoryConfig {
         backend: backend.to_string(),
         auto_save: profile.auto_save_default,
+        auto_dialectic: false,
         hygiene_enabled: profile.uses_sqlite_hygiene,
         archive_after_days: if profile.uses_sqlite_hygiene { 7 } else { 0 },
         purge_after_days: if profile.uses_sqlite_hygiene { 30 } else { 0 },

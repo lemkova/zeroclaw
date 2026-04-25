@@ -5156,6 +5156,12 @@ pub struct MemoryConfig {
     pub backend: String,
     /// Auto-save user-stated conversation input to memory (assistant output is excluded)
     pub auto_save: bool,
+    /// Auto-distill durable user facts from each (user_msg, assistant_reply) pair
+    /// and store them as per-sender Core memory entries. Implemented as a
+    /// fire-and-forget hook after each turn (see `runtime::agent::dialectic`).
+    /// Adds one cheap LLM call per turn; off by default.
+    #[serde(default)]
+    pub auto_dialectic: bool,
     /// Run memory/session hygiene (archiving + retention cleanup)
     #[serde(default = "default_hygiene_enabled")]
     pub hygiene_enabled: bool,
@@ -5376,6 +5382,7 @@ impl Default for MemoryConfig {
         Self {
             backend: "sqlite".into(),
             auto_save: true,
+            auto_dialectic: false,
             hygiene_enabled: default_hygiene_enabled(),
             archive_after_days: default_archive_after_days(),
             purge_after_days: default_purge_after_days(),
