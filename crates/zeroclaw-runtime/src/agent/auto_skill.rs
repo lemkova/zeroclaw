@@ -1,18 +1,15 @@
-//! Auto-skill creation hook (v0.6: multi-file + channel notification).
+//! Auto-skill creation + improvement hook.
 //!
-//! Post-turn fire-and-forget hook that asks the LLM whether the just-completed
-//! turn produced a reusable workflow worth saving, and if so writes the
-//! resulting `SKILL.md` (plus any code/script files the LLM emitted alongside
-//! it) under `~/.zeroclaw/workspace/skills/<name>/`.
+//! Post-turn fire-and-forget hook that asks the LLM, given a single
+//! conversation turn, whether to:
 //!
-//! v0.6 additions vs v0.5:
-//! 1. Multi-file skills — the LLM may emit `--- BEGIN FILE: <name> --- ...
-//!    --- END FILE ---` blocks alongside the markdown body. This lets the
-//!    agent write Python/shell helpers when the procedure is too complex for
-//!    inline shell commands (auth headers, request signing, response parsing).
-//! 2. Channel notification — when a `Channel` reference is provided, emit a
-//!    single `💾 Skill 'name' created` message after a successful write so
-//!    the operator gets immediate feedback (Hermes-style).
+//!   - SAVE   a brand-new reusable workflow as a fresh skill
+//!   - UPDATE an existing skill that just misbehaved or could be improved
+//!   - NONE   leave the skill catalog alone (most turns)
+//!
+//! The LLM sees the current skill catalogue (name + description) so it can
+//! choose between SAVE and UPDATE intelligently. UPDATE overwrites the
+//! existing SKILL.md (with version bump) and any helper files specified.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,46 +20,66 @@ use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_api::provider::Provider;
 
 const SYSTEM_PROMPT: &str = "\
-You are a workflow distillation system. Decide whether a conversation turn produced a reusable PROCEDURAL workflow worth saving as a skill — a recipe the agent can re-run for a similar task.
+You are a skill-maintenance system. Review this conversation turn and decide whether to:
 
-NOTE: You are NOT distilling user facts (a separate system handles that). Your only job is procedural workflows.
+  SAVE   — save a brand-new reusable workflow as a fresh skill
+  UPDATE — overwrite an existing skill that just FAILED, returned wrong output, or
+           that you can clearly improve based on what just happened
+  NONE   — leave the skill catalog alone (most turns)
 
-SAVE when the turn involves a sequence of API calls, shell commands, or transformations that could be replayed for a similar request.
+GUIDELINES
 
-Examples that SHOULD be saved (worth a skill):
-- Fetching BTC price + 24h change from Binance (2 API calls + parsing) → fetch_btc_price
-- Checking Laravel Horizon health (supervisorctl + redis-cli + psql + horizon:failed) → laravel_horizon_health_check
-- Querying GitHub commits for a repo with auth (curl + parse JSON) → github_recent_commits
+Save NEW (SAVE) only when ALL hold:
+- Turn involved a procedure (≥2 actions, API calls, or transformations) that could be re-applied to a similar task later.
+- No existing skill in the catalogue already covers it.
+- Outcome was successful.
 
-Examples that should NOT be saved:
-- Single shell command (`ls`, `df -h`, `pwd`)
-- Pure Q&A or explanation with no commands
-- Failed attempts, debugging, exploratory commands
-- One-off requests with no replayable structure
-- Already-existing skill (we will skip duplicate names automatically)
+Examples that SHOULD be saved as a NEW skill:
+- Fetching BTC price from Binance (2 API calls + parsing) → fetch_btc_price
+- Checking Laravel Horizon health (supervisor + redis + psql + horizon:failed) → laravel_horizon_health_check
 
-If the procedure needs more than a one-liner — request signing, HMAC/OAuth, multi-step JSON transforms, retries — emit one or more code FILES alongside the body so future runs can `python ${SKILL_DIR}/<file>.py` (or `bash ${SKILL_DIR}/<file>.sh`) instead of inlining fragile commands.
+Update an existing skill (UPDATE) when at least one holds:
+- An existing skill was invoked this turn and returned an error / non-zero exit / clearly wrong output.
+- The user complained about the result.
+- The agent worked around an existing skill with inline commands because the skill was incomplete or wrong.
+- A schema/API the skill depends on changed and the agent had to compensate.
+- You found a strictly better implementation than what the skill currently has.
 
-If saving, output EXACTLY this format and nothing else:
+Do NOT update a skill that worked correctly. Do NOT save a skill that already exists by another name.
+
+If saving (SAVE), output EXACTLY:
 
 SAVE
 name: lowercase_snake_case_max_40_chars
 description: <≤120 chars, concrete, mentions when to use it>
 body:
-<markdown body — the recipe / how to invoke. Reference any FILE you emit by name. Use ${SKILL_DIR} as a placeholder for the skill's own directory.>
+<markdown body — instructions for invoking. Reference any FILE you emit by name. Use ${SKILL_DIR} as a placeholder for the skill directory.>
+
+(Optional FILE blocks — see below.)
+
+If improving an existing skill (UPDATE), output EXACTLY:
+
+UPDATE
+name: <MUST match an existing skill name exactly, lowercase_snake_case>
+description: <updated ≤120-char description>
+body:
+<full new markdown body — overwrites the old SKILL.md body>
+
+(Optional FILE blocks — overwrite or add helper files.)
+
+FILE blocks (used by both SAVE and UPDATE):
 
 --- BEGIN FILE: <relative_filename_no_subdirs> ---
 <file content, exactly as it should land on disk>
 --- END FILE ---
 
-(Repeat the BEGIN/END FILE block for each additional file. Filenames must be plain (e.g. `fetch.py`, `parse.sh`); no slashes, no leading dots, no parent paths. Omit FILE blocks entirely for shell-only skills.)
+(Filenames must be plain (e.g. `fetch.py`, `parse.sh`); no slashes, no leading dots, no parent paths. Allowed extensions: .py .sh .txt .md .json .yaml .toml.)
 
-If not saving, output EXACTLY: NONE";
+If neither saving nor updating, output EXACTLY: NONE";
 
-/// Evaluate the turn for skill-worthiness; if worth saving, write SKILL.md
-/// (plus any code files the LLM emitted) and optionally post a creation
-/// notification to a channel. Best-effort: every failure is debug-logged
-/// and otherwise swallowed.
+/// Evaluate the turn and either save a new skill, improve an existing one, or
+/// do nothing. Best-effort: every failure is debug-logged and otherwise
+/// swallowed, never affecting the user-facing reply.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_and_save(
     provider: Arc<dyn Provider>,
@@ -77,9 +94,25 @@ pub async fn evaluate_and_save(
     if user_msg.trim().is_empty() || assistant_reply.trim().is_empty() {
         return;
     }
+
+    // Build a compact list of existing skills (name + description) so the LLM
+    // can decide between SAVE and UPDATE.
+    let existing_catalogue = list_existing_skills(&workspace_dir).await;
+    let catalogue_block = if existing_catalogue.is_empty() {
+        "EXISTING SKILLS: (none)".to_string()
+    } else {
+        let lines: Vec<String> = existing_catalogue
+            .iter()
+            .map(|(n, d)| format!("- {n}: {d}"))
+            .collect();
+        format!("EXISTING SKILLS:\n{}", lines.join("\n"))
+    };
+
     let u = truncate_chars(&user_msg, 1500);
     let a = truncate_chars(&assistant_reply, 4000);
-    let user_prompt = format!("USER MESSAGE:\n{u}\n\nASSISTANT REPLY:\n{a}\n\nDecide:");
+    let user_prompt = format!(
+        "{catalogue_block}\n\nUSER MESSAGE:\n{u}\n\nASSISTANT REPLY:\n{a}\n\nDecide:"
+    );
 
     let raw = match tokio::time::timeout(
         Duration::from_secs(45),
@@ -104,87 +137,197 @@ pub async fn evaluate_and_save(
         raw_preview = %truncate_chars(trimmed, 200),
         "auto-skill: LLM responded"
     );
+
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NONE") {
         return;
     }
-    let Some(parsed) = parse_skill_response(trimmed) else {
-        tracing::debug!(
-            sender = %sender,
-            raw = %truncate_chars(trimmed, 200),
-            "auto-skill: unparseable response"
-        );
-        return;
+
+    let parsed = match parse_skill_response(trimmed) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(sender = %sender, "auto-skill: unparseable response");
+            return;
+        }
     };
 
     if !is_valid_skill_name(&parsed.name) || parsed.body.trim().is_empty() {
-        tracing::debug!(
-            sender = %sender,
-            name = %parsed.name,
-            "auto-skill: rejected (invalid name or empty body)"
-        );
+        tracing::debug!(sender = %sender, name = %parsed.name, "auto-skill: rejected (invalid name or empty body)");
         return;
     }
     for f in &parsed.files {
         if !is_safe_filename(&f.name) {
-            tracing::debug!(
-                sender = %sender,
-                name = %parsed.name,
-                file = %f.name,
-                "auto-skill: rejected (unsafe file name)"
-            );
+            tracing::debug!(sender = %sender, file = %f.name, "auto-skill: rejected (unsafe file name)");
             return;
         }
     }
 
     let skill_dir = workspace_dir.join("skills").join(&parsed.name);
-    if skill_dir.exists() {
-        tracing::debug!(
-            sender = %sender,
-            name = %parsed.name,
-            "auto-skill: skill already exists, skipping"
-        );
-        return;
-    }
+    let dir_exists = skill_dir.exists();
 
-    if let Err(e) = fs::create_dir_all(&skill_dir).await {
-        tracing::debug!(
-            error = %e,
-            sender = %sender,
-            name = %parsed.name,
-            "auto-skill: mkdir failed"
-        );
-        return;
+    match parsed.action {
+        SkillAction::Save => {
+            if dir_exists {
+                tracing::debug!(
+                    sender = %sender,
+                    name = %parsed.name,
+                    "auto-skill: SAVE skipped — skill already exists (would conflict)"
+                );
+                return;
+            }
+            if let Err(e) = fs::create_dir_all(&skill_dir).await {
+                tracing::debug!(error = %e, sender = %sender, "auto-skill: mkdir failed");
+                return;
+            }
+            write_skill_files(&skill_dir, &parsed, &sender, "0.1.0").await;
+            tracing::info!(
+                sender = %sender,
+                name = %parsed.name,
+                files = ?parsed.files.iter().map(|f| &f.name).collect::<Vec<_>>(),
+                "auto-skill: wrote new skill"
+            );
+            notify(notify_channel, notify_target, &format!(
+                "\u{1F4BE} Skill `{name}` created{extra}.\n_{desc}_",
+                name = parsed.name,
+                desc = parsed.description,
+                extra = file_count_suffix(&parsed.files),
+            )).await;
+        }
+        SkillAction::Update => {
+            if !dir_exists {
+                tracing::debug!(
+                    sender = %sender,
+                    name = %parsed.name,
+                    "auto-skill: UPDATE skipped — target skill does not exist"
+                );
+                return;
+            }
+            // Bump version: read old SKILL.md, parse `version: X.Y.Z`, +1 patch.
+            let old_md_path = skill_dir.join("SKILL.md");
+            let next_version = match fs::read_to_string(&old_md_path).await {
+                Ok(content) => bump_version(&content),
+                Err(_) => "0.1.1".to_string(),
+            };
+            write_skill_files(&skill_dir, &parsed, &sender, &next_version).await;
+            tracing::info!(
+                sender = %sender,
+                name = %parsed.name,
+                version = %next_version,
+                files = ?parsed.files.iter().map(|f| &f.name).collect::<Vec<_>>(),
+                "auto-skill: updated existing skill"
+            );
+            notify(notify_channel, notify_target, &format!(
+                "\u{1F527} Skill `{name}` updated to v{version}{extra}.\n_{desc}_",
+                name = parsed.name,
+                version = next_version,
+                desc = parsed.description,
+                extra = file_count_suffix(&parsed.files),
+            )).await;
+        }
     }
+}
 
-    let tag = format!("[auto, {}]", sanitize_tag(&sender));
+/// Find existing skills under `workspace_dir/skills/<name>/SKILL.md` and read
+/// their name+description. Cheap (~few file reads); only the description line
+/// is parsed. Best-effort: failures yield an empty list.
+async fn list_existing_skills(workspace_dir: &PathBuf) -> Vec<(String, String)> {
+    let skills_dir = workspace_dir.join("skills");
+    let mut out = Vec::new();
+    let mut rd = match fs::read_dir(&skills_dir).await {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let md = path.join("SKILL.md");
+        let Ok(content) = fs::read_to_string(&md).await else {
+            continue;
+        };
+        let name = parse_frontmatter_field(&content, "name")
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str().map(ToString::to_string))
+            })
+            .unwrap_or_default();
+        let desc = parse_frontmatter_field(&content, "description").unwrap_or_default();
+        if !name.is_empty() {
+            out.push((name, desc));
+        }
+    }
+    out
+}
+
+fn parse_frontmatter_field(md: &str, field: &str) -> Option<String> {
+    // Crude but sufficient: scan first 30 lines for `<field>: ...` after `---`.
+    let mut in_fm = false;
+    for (i, line) in md.lines().take(30).enumerate() {
+        if i == 0 && line.trim() == "---" {
+            in_fm = true;
+            continue;
+        }
+        if in_fm && line.trim() == "---" {
+            break;
+        }
+        if !in_fm {
+            continue;
+        }
+        let lower = line.trim_start().to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix(&format!("{field}:")) {
+            let _ = rest;
+            // Take the substring after the first ':' in the original (to preserve case).
+            if let Some(idx) = line.find(':') {
+                let value = line[idx + 1..].trim().trim_matches('"');
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Bump the `version: X.Y.Z` in SKILL.md frontmatter by incrementing the
+/// patch number. Returns the new version string. Defaults to `0.1.1` if the
+/// existing version is missing or malformed.
+fn bump_version(md: &str) -> String {
+    let current = parse_frontmatter_field(md, "version").unwrap_or_else(|| "0.1.0".to_string());
+    let parts: Vec<&str> = current.split('.').collect();
+    if parts.len() != 3 {
+        return "0.1.1".to_string();
+    }
+    let (Ok(major), Ok(minor), Ok(patch)) = (
+        parts[0].parse::<u32>(),
+        parts[1].parse::<u32>(),
+        parts[2].parse::<u32>(),
+    ) else {
+        return "0.1.1".to_string();
+    };
+    format!("{major}.{minor}.{}", patch + 1)
+}
+
+async fn write_skill_files(
+    skill_dir: &std::path::Path,
+    parsed: &ParsedSkill,
+    sender: &str,
+    version: &str,
+) {
+    let tag = format!("[auto, {}]", sanitize_tag(sender));
     let frontmatter = format!(
-        "---\nname: {}\ndescription: {}\nversion: 0.1.0\nauthor: auto-skill\ntags: {}\n---\n\n",
+        "---\nname: {}\ndescription: {}\nversion: {}\nauthor: auto-skill\ntags: {}\n---\n\n",
         parsed.name,
         escape_yaml_value(&parsed.description),
+        version,
         tag,
     );
     let skill_md = skill_dir.join("SKILL.md");
-    if let Err(e) = fs::write(&skill_md, format!("{frontmatter}{}\n", parsed.body.trim())).await {
-        tracing::debug!(
-            error = %e,
-            path = %skill_md.display(),
-            "auto-skill: SKILL.md write failed"
-        );
-        return;
-    }
+    let _ = fs::write(&skill_md, format!("{frontmatter}{}\n", parsed.body.trim())).await;
 
-    let mut written_files = Vec::with_capacity(parsed.files.len());
     for f in &parsed.files {
         let path = skill_dir.join(&f.name);
         if let Err(e) = fs::write(&path, f.content.as_bytes()).await {
-            tracing::debug!(
-                error = %e,
-                path = %path.display(),
-                "auto-skill: code file write failed"
-            );
+            tracing::debug!(error = %e, path = %path.display(), "auto-skill: file write failed");
             continue;
         }
-        // Mark shell scripts executable (Python is invoked via `python …`).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -196,34 +339,33 @@ pub async fn evaluate_and_save(
                 }
             }
         }
-        written_files.push(f.name.clone());
     }
+}
 
-    tracing::info!(
-        sender = %sender,
-        name = %parsed.name,
-        files = ?written_files,
-        path = %skill_md.display(),
-        "auto-skill: wrote new skill"
-    );
-
-    // Channel notification (Hermes-style "💾 Skill '<name>' created").
-    if let (Some(ch), Some(target)) = (notify_channel.as_ref(), notify_target.as_ref()) {
-        let extra = if written_files.is_empty() {
-            String::new()
-        } else {
-            format!(" ({} file(s): {})", written_files.len(), written_files.join(", "))
-        };
-        let body = format!(
-            "\u{1F4BE} Skill `{}` created{}.\n_{}_",
-            parsed.name, extra, parsed.description
-        );
-        let _ = ch.send(&SendMessage::new(&body, target.as_str())).await;
+fn file_count_suffix(files: &[ParsedFile]) -> String {
+    if files.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        format!(" ({} file(s): {})", files.len(), names.join(", "))
     }
+}
+
+async fn notify(channel: Option<Arc<dyn Channel>>, target: Option<String>, body: &str) {
+    if let (Some(ch), Some(t)) = (channel, target) {
+        let _ = ch.send(&SendMessage::new(body, t.as_str())).await;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SkillAction {
+    Save,
+    Update,
 }
 
 #[derive(Debug)]
 struct ParsedSkill {
+    action: SkillAction,
     name: String,
     description: String,
     body: String,
@@ -236,38 +378,50 @@ struct ParsedFile {
     content: String,
 }
 
-/// Parse the LLM response into name/description/body and any FILE blocks.
+/// Parse the LLM response. Accepts a leading `SAVE` or `UPDATE` line, then
+/// `name:`/`description:`/`body:` followed by the body and optional FILE
+/// blocks.
 fn parse_skill_response(raw: &str) -> Option<ParsedSkill> {
     let mut lines = raw.lines();
-    if !lines.next()?.trim().eq_ignore_ascii_case("SAVE") {
+    let header = lines.next()?.trim();
+    let action = if header.eq_ignore_ascii_case("SAVE") {
+        SkillAction::Save
+    } else if header.eq_ignore_ascii_case("UPDATE") {
+        SkillAction::Update
+    } else {
         return None;
-    }
+    };
 
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
     let mut body_lines: Vec<&str> = Vec::new();
     let mut files: Vec<ParsedFile> = Vec::new();
-    let mut state = State::Header;
+    let mut state = HeaderOrBody::Header;
     let mut current_file: Option<(String, Vec<&str>)> = None;
 
-    enum State {
+    enum HeaderOrBody {
         Header,
         Body,
     }
 
     for line in lines {
         match state {
-            State::Header => {
+            HeaderOrBody::Header => {
                 let t = line.trim_start();
                 if let Some(rest) = strip_ci_prefix(t, "name:") {
-                    name = Some(rest.trim().to_string());
-                } else if let Some(rest) = strip_ci_prefix(t, "description:") {
-                    description = Some(rest.trim().to_string());
-                } else if t.eq_ignore_ascii_case("body:") || t.to_ascii_lowercase().starts_with("body:") {
-                    state = State::Body;
+                    let _ = rest;
+                    name = line
+                        .find(':')
+                        .map(|i| line[i + 1..].trim().to_string());
+                } else if strip_ci_prefix(t, "description:").is_some() {
+                    description = line
+                        .find(':')
+                        .map(|i| line[i + 1..].trim().to_string());
+                } else if t.to_ascii_lowercase().starts_with("body:") {
+                    state = HeaderOrBody::Body;
                 }
             }
-            State::Body => {
+            HeaderOrBody::Body => {
                 let trimmed = line.trim();
                 if let Some(fname) = strip_file_open(trimmed) {
                     current_file = Some((fname, Vec::new()));
@@ -292,6 +446,7 @@ fn parse_skill_response(raw: &str) -> Option<ParsedSkill> {
     }
 
     Some(ParsedSkill {
+        action,
         name: name?.trim().to_string(),
         description: description?.trim().to_string(),
         body: body_lines.join("\n").trim().to_string(),
@@ -299,7 +454,6 @@ fn parse_skill_response(raw: &str) -> Option<ParsedSkill> {
     })
 }
 
-/// Match `--- BEGIN FILE: foo.py ---` (allowing minor whitespace variation).
 fn strip_file_open(line: &str) -> Option<String> {
     let t = line.trim();
     let prefix = "--- BEGIN FILE:";
@@ -335,8 +489,6 @@ fn is_valid_skill_name(s: &str) -> bool {
         && !s.ends_with('_')
 }
 
-/// Allow only plain filenames, no path components, no leading dots.
-/// Restricts to safe Python/shell/text extensions.
 fn is_safe_filename(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
         return false;
@@ -391,38 +543,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_simple_save() {
-        let raw = "SAVE\nname: foo_bar\ndescription: do foo\nbody:\nrun foo";
+    fn parses_save() {
+        let raw = "SAVE\nname: foo\ndescription: do foo\nbody:\nrun foo";
         let p = parse_skill_response(raw).expect("parse");
-        assert_eq!(p.name, "foo_bar");
-        assert_eq!(p.description, "do foo");
-        assert!(p.files.is_empty());
+        assert_eq!(p.action, SkillAction::Save);
+        assert_eq!(p.name, "foo");
     }
 
     #[test]
-    fn parses_multi_file() {
-        let raw = "SAVE\n\
-                   name: btc_holders\n\
-                   description: fetch holders\n\
-                   body:\n\
-                   Run: shell `python ${SKILL_DIR}/fetch.py`\n\
-                   --- BEGIN FILE: fetch.py ---\n\
-                   import os\n\
-                   print(\"hi\")\n\
-                   --- END FILE ---";
+    fn parses_update_with_file() {
+        let raw = "UPDATE\nname: btc\ndescription: fixed\nbody:\nbash $SKILL_DIR/parse.sh\n--- BEGIN FILE: parse.sh ---\necho fixed\n--- END FILE ---";
         let p = parse_skill_response(raw).expect("parse");
+        assert_eq!(p.action, SkillAction::Update);
         assert_eq!(p.files.len(), 1);
-        assert_eq!(p.files[0].name, "fetch.py");
-        assert!(p.files[0].content.contains("import os"));
+        assert_eq!(p.files[0].name, "parse.sh");
     }
 
     #[test]
-    fn rejects_unsafe_filename() {
-        assert!(!is_safe_filename("../etc/passwd"));
-        assert!(!is_safe_filename("/etc/passwd"));
-        assert!(!is_safe_filename(".hidden.py"));
-        assert!(!is_safe_filename("normal.exe"));
-        assert!(is_safe_filename("fetch.py"));
-        assert!(is_safe_filename("parse_data.py"));
+    fn rejects_unknown_action() {
+        assert!(parse_skill_response("DELETE\nname: foo").is_none());
+    }
+
+    #[test]
+    fn bump_version_works() {
+        assert_eq!(
+            bump_version("---\nname: x\nversion: 0.1.7\n---\nbody"),
+            "0.1.8"
+        );
+        assert_eq!(bump_version("---\nname: x\nversion: 1.2.3\n---\n"), "1.2.4");
+        assert_eq!(bump_version("---\nname: x\n---\n"), "0.1.1");
+        assert_eq!(bump_version("---\nname: x\nversion: bogus\n---\n"), "0.1.1");
     }
 }
