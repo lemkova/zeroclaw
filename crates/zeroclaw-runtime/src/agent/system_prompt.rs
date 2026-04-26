@@ -54,7 +54,7 @@ fn load_openclaw_bootstrap_files(
 /// Display version string baked at compile time. Mirrors what
 /// `zeroclaw --version` prints, so the agent can answer identity/version
 /// questions from system-prompt context without spawning shell commands.
-const RUNTIME_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " + Lemkova Patch v0.9");
+const RUNTIME_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " + Lemkova Patch v0.10");
 
 pub fn build_system_prompt(
     workspace_dir: &std::path::Path,

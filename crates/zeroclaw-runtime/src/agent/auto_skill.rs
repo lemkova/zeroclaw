@@ -47,6 +47,12 @@ Update an existing skill (UPDATE) when at least one holds:
 
 Do NOT update a skill that worked correctly. Do NOT save a skill that already exists by another name.
 
+WRITING A GOOD SKILL BODY (applies to both SAVE and UPDATE):
+- Make the body REUSABLE on similar inputs, not hardcoded to one specific case.
+- Replace concrete identifiers that vary across uses (URLs, hostnames, IDs, file paths, search terms, dates, target names) with placeholders in <ANGLE_BRACKETS> (e.g. <TARGET_URL>, <STOCK_CODE>, <USERNAME>). Keep one fully-worked example using real values from the current turn so the agent has a concrete template, but mark the variable parts as placeholders.
+- Include a short `## When to use` section at the top of the body listing 1-3 trigger heuristics (e.g. user asks to investigate anti-adblock on a WordPress-based site). This helps the agent recognise applicability later.
+- Avoid baking the user literal request into the skill — write it as procedural guidance the agent itself can follow, not as a transcript of one conversation.
+
 If saving (SAVE), output EXACTLY:
 
 SAVE
