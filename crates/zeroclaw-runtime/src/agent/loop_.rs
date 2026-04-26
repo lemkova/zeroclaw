@@ -1109,7 +1109,14 @@ pub async fn run_tool_call_loop(
         let mut streamed_live_deltas = false;
 
         let chat_result = if should_consume_provider_stream {
-            match consume_provider_streaming_response(
+            // Hard timeout on the streaming consumer too. Streams can take a
+            // while when the model produces a lot of text, so be generous (5
+            // min default), but never await forever — a hung server-side
+            // stream that never sends [DONE] will silently swallow the turn.
+            let stream_timeout = Duration::from_secs(
+                pacing.step_timeout_secs.unwrap_or(0).max(1).max(300)
+            );
+            let stream_future = consume_provider_streaming_response(
                 active_provider,
                 &prepared_messages.messages,
                 request_tools,
@@ -1117,9 +1124,14 @@ pub async fn run_tool_call_loop(
                 temperature,
                 cancellation_token.as_ref(),
                 on_delta.as_ref(),
-            )
-            .await
-            {
+            );
+            let stream_result = match tokio::time::timeout(stream_timeout, stream_future).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!(
+                    "streaming chat timed out after {stream_timeout:?} (provider stream hung)"
+                )),
+            };
+            match stream_result {
                 Ok(streamed) => {
                     streamed_live_deltas = streamed.forwarded_live_deltas;
                     Ok(zeroclaw_providers::ChatResponse {
@@ -1158,13 +1170,29 @@ pub async fn run_tool_call_loop(
                             active_model,
                             temperature,
                         );
+                        // Hard timeout — fallback chat must not hang forever.
+                        // Use the configured step timeout, falling back to 5min.
+                        let step_timeout = Duration::from_secs(
+                            pacing.step_timeout_secs.unwrap_or(0).max(1).max(300)
+                        );
+                        let timed_chat = tokio::time::timeout(step_timeout, chat_future);
                         if let Some(token) = cancellation_token.as_ref() {
                             tokio::select! {
                                 () = token.cancelled() => Err(ToolLoopCancelled.into()),
-                                result = chat_future => result,
+                                result = timed_chat => match result {
+                                    Ok(r) => r,
+                                    Err(_) => Err(anyhow::anyhow!(
+                                        "non-streaming chat timed out after {step_timeout:?} (provider hung after streaming fallback)"
+                                    )),
+                                },
                             }
                         } else {
-                            chat_future.await
+                            match timed_chat.await {
+                                Ok(r) => r,
+                                Err(_) => Err(anyhow::anyhow!(
+                                    "non-streaming chat timed out after {step_timeout:?} (provider hung after streaming fallback)"
+                                )),
+                            }
                         }
                     }
                 }
