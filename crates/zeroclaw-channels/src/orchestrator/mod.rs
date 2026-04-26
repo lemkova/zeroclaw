@@ -2059,7 +2059,11 @@ async fn classify_channel_reply_intent(
         .await?;
     let trimmed = response.trim();
     if trimmed.is_empty() {
-        return Ok(AssistantChannelOutcome::NoReply { reason: None });
+        // Fail open: a classifier timeout or empty response should not silently
+        // swallow the user's message. Default to REPLY; the actual turn handler
+        // will produce a sensible response (or an explicit error).
+        tracing::warn!("classify_channel_reply_intent: empty response, defaulting to REPLY");
+        return Ok(AssistantChannelOutcome::Reply(String::new()));
     }
     if trimmed.eq_ignore_ascii_case("REPLY") {
         return Ok(AssistantChannelOutcome::Reply(String::new()));
@@ -2806,15 +2810,22 @@ async fn process_channel_message(
     }
 
     // ── Reply-intent precheck ────────────────────────────────────────
-    let reply_intent = classify_channel_reply_intent(
-        active_provider.as_ref(),
-        history[0].content.as_str(),
-        &history,
-        route.model.as_str(),
-        runtime_defaults.temperature,
-    )
-    .await
-    .unwrap_or(AssistantChannelOutcome::Reply(String::new()));
+    // The precheck classifier exists to filter group-chat noise (so the bot
+    // doesn't reply to every message in a busy group). For DMs / 1-on-1
+    // conversations every inbound message is for us; skip the extra LLM call.
+    let reply_intent = if is_group_chat {
+        classify_channel_reply_intent(
+            active_provider.as_ref(),
+            history[0].content.as_str(),
+            &history,
+            route.model.as_str(),
+            runtime_defaults.temperature,
+        )
+        .await
+        .unwrap_or(AssistantChannelOutcome::Reply(String::new()))
+    } else {
+        AssistantChannelOutcome::Reply(String::new())
+    };
 
     if let AssistantChannelOutcome::NoReply { reason } = reply_intent {
         let history_response = AssistantChannelOutcome::NoReply {

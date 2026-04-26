@@ -698,7 +698,10 @@ impl TelegramChannel {
 
         // Collect commands from installed skills.
         if let Some(ref workspace_dir) = self.workspace_dir {
-            let skills = zeroclaw_runtime::skills::load_skills(workspace_dir);
+            // Use allow_scripts=true here: this loader is only used to enumerate skill
+            // names for Telegram bot command registration (UI), not to execute
+            // anything from them. The strict audit lives at agent-execution time.
+            let skills = zeroclaw_runtime::skills::load_skills_from_directory(&workspace_dir.join("skills"), true);
 
             for skill in &skills {
                 let sanitized = sanitize_telegram_command_name(&skill.name);
